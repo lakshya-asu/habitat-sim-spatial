@@ -46,7 +46,7 @@ class HabitatSimInteractiveViewer(Application):
     DISPLAY_FONT_SIZE = 16.0
 
     def __init__(self, sim_settings: Dict[str, Any]) -> None:
-        self.sim_settings: Dict[str:Any] = sim_settings
+        self.sim_settings: Dict[str,Any] = sim_settings
 
         self.enable_batch_renderer: bool = self.sim_settings["enable_batch_renderer"]
         self.num_env: int = (
@@ -59,12 +59,11 @@ class HabitatSimInteractiveViewer(Application):
             self.sim_settings["window_height"],
         )
 
-        Application.__init__(
-            self,
-            self.Configuration(
-                title="Habitat Sim Interactive Viewer", size=window_size
-            ),
-        )
+        cfg = self.Configuration()
+        cfg.title = "Habitat Sim Interactive Viewer"
+        cfg.size = window_size  # or mn.Vector2i(window_size) if needed
+
+        Application.__init__(self, cfg)
         self.fps: float = 60.0
 
         # Compute environment camera resolution based on the number of environments to render in the window.
@@ -87,6 +86,7 @@ class HabitatSimInteractiveViewer(Application):
 
         # set up our movement key bindings map
         key = Application.Key
+        self.pressed = {}
         self.key_to_action = {
             key.UP: "look_up",
             key.DOWN: "look_down",
@@ -118,10 +118,20 @@ class HabitatSimInteractiveViewer(Application):
             + ":-_+,.! %µ",
         )
 
-        # magnum text object that displays CPU/GPU usage data in the app window
-        self.window_text = text.RendererGL(self.glyph_cache)
-        self.window_text.alignment = text.Alignment.TOP_LEFT
-
+        # --- magnum text renderer (HUD) ---
+        if hasattr(text, "Renderer2D"):
+            self.window_text = text.Renderer2D(
+                self.display_font,
+                self.glyph_cache,
+                HabitatSimInteractiveViewer.DISPLAY_FONT_SIZE,
+                alignment=text.Alignment.TOP_LEFT,
+            )
+            self.window_text.reserve(512)
+        elif hasattr(text, "RendererGL"):
+            self.window_text = text.RendererGL(self.glyph_cache)
+            self.window_text.alignment = text.Alignment.TOP_LEFT
+        else:
+            raise RuntimeError("No Magnum text renderer available (Renderer2D/RendererGL missing).")
         # text object transform in window space is Projection matrix times Translation Matrix
         # put text in top left of window
         self.window_text_transform = mn.Matrix3.projection(
@@ -286,9 +296,13 @@ class HabitatSimInteractiveViewer(Application):
         if self.enable_batch_renderer:
             self.render_batch()
         else:
-            self.sim.sensors[keys[1]].draw_observation()
+            
             agent = self.sim.get_agent(keys[0])
             self.render_camera = agent.scene_node.node_sensor_suite.get(keys[1])
+
+            # Trigger rendering by requesting an observation
+            self.sim.get_sensor_observations()   # or: self.sim.get_sensor_observations()
+
             self.debug_draw()
             self.render_camera.render_target.blit_rgba_to_default()
 
@@ -299,6 +313,13 @@ class HabitatSimInteractiveViewer(Application):
         self.swap_buffers()
         Timer.next_frame()
         self.redraw()
+
+    def is_key_pressed(self, key: Application.Key) -> bool:
+            """
+            Compatibility shim: some Magnum bindings provide Application.is_key_pressed(),
+            others don't. We track key state ourselves via self.pressed.
+            """
+            return bool(getattr(self, "pressed", {}).get(key, False))
 
     def default_agent_config(self) -> habitat_sim.agent.AgentConfiguration:
         """
@@ -468,6 +489,7 @@ class HabitatSimInteractiveViewer(Application):
         key will be set to False for the next `self.move_and_look()` to update the current actions.
         """
         key = event.key
+        self.pressed[key] = True
         pressed = Application.Key
         mod = Application.Modifier
 
@@ -639,14 +661,9 @@ class HabitatSimInteractiveViewer(Application):
         self.redraw()
 
     def key_release_event(self, event: Application.KeyEvent) -> None:
-        """
-        Handles `Application.KeyEvent` on a key release. When a key is released, if it
-        is part of the movement keys map `Dict[KeyEvent.key, Bool]`, then the key will
-        be set to False for the next `self.move_and_look()` to update the current actions.
-        """
-
-        event.accepted = True
-        self.redraw()
+            self.pressed[event.key] = False
+            event.accepted = True
+            self.redraw()
 
     def pointer_move_event(self, event: Application.PointerMoveEvent) -> None:
         """
@@ -904,38 +921,41 @@ class HabitatSimInteractiveViewer(Application):
         exit(0)
 
     def draw_text(self, sensor_spec):
-        # make magnum text background transparent for text
-        mn.gl.Renderer.enable(mn.gl.Renderer.Feature.BLENDING)
-        mn.gl.Renderer.set_blend_function(
-            mn.gl.Renderer.BlendFunction.ONE,
-            mn.gl.Renderer.BlendFunction.ONE_MINUS_SOURCE_ALPHA,
-        )
+            # Transparent background for text
+            mn.gl.Renderer.enable(mn.gl.Renderer.Feature.BLENDING)
+            mn.gl.Renderer.set_blend_function(
+                mn.gl.Renderer.BlendFunction.ONE,
+                mn.gl.Renderer.BlendFunction.ONE_MINUS_SOURCE_ALPHA,
+            )
 
-        self.shader.bind_vector_texture(self.glyph_cache.texture)
-        self.shader.transformation_projection_matrix = self.window_text_transform
-        self.shader.color = [1.0, 1.0, 1.0]
+            self.shader.bind_vector_texture(self.glyph_cache.texture)
+            self.shader.transformation_projection_matrix = self.window_text_transform
+            self.shader.color = [1.0, 1.0, 1.0]
 
-        sensor_type_string = str(sensor_spec.sensor_type.name)
-        sensor_subtype_string = str(sensor_spec.sensor_subtype.name)
-        if self.mouse_interaction == MouseMode.LOOK:
-            mouse_mode_string = "LOOK"
-        elif self.mouse_interaction == MouseMode.GRAB:
-            mouse_mode_string = "GRAB"
-        self.window_text.clear()  # replace all previous text
-        self.window_text.render(
-            self.display_font.create_shaper(),
-            self.display_font.size,
-            f"""
-{self.fps} FPS
-Sensor Type: {sensor_type_string}
-Sensor Subtype: {sensor_subtype_string}
-Mouse Interaction Mode: {mouse_mode_string}
-            """,
-        )
-        self.shader.draw(self.window_text.mesh)
+            sensor_type_string = str(sensor_spec.sensor_type.name)
+            sensor_subtype_string = str(sensor_spec.sensor_subtype.name)
+            mouse_mode_string = "LOOK" if self.mouse_interaction == MouseMode.LOOK else "GRAB"
 
-        # Disable blending for text
-        mn.gl.Renderer.disable(mn.gl.Renderer.Feature.BLENDING)
+            self.window_text.clear()
+            self.window_text.render(
+                self.display_font.create_shaper(),
+                HabitatSimInteractiveViewer.DISPLAY_FONT_SIZE,  # <-- key change
+                f"""{self.fps} FPS
+        Sensor Type: {sensor_type_string}
+        Sensor Subtype: {sensor_subtype_string}
+        Mouse Interaction Mode: {mouse_mode_string}
+        """,
+            )
+
+            # Draw text
+            if hasattr(self.window_text, "mesh"):
+                self.shader.draw(self.window_text.mesh)
+            elif hasattr(self.window_text, "draw"):
+                self.window_text.draw(self.shader)
+            else:
+                raise RuntimeError("Unknown Magnum text renderer API.")
+
+            mn.gl.Renderer.disable(mn.gl.Renderer.Feature.BLENDING)
 
     def print_help_text(self) -> None:
         """
